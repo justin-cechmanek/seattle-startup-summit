@@ -1,0 +1,7 @@
+openai
+redis
+requests
+python-dotenv
+fastapi
+httpx
+tqdm
