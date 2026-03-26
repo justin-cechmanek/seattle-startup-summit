@@ -11,6 +11,8 @@ services:
     depends_on:
       - redis-stack
     environment:
+      ENABLE_DISCRETE_MEMORY_EXTRACTION: "true"
+      GENERATION_MODEL: gpt-4o-mini
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       REDIS_URL: redis://redis-stack:6379
     ports:

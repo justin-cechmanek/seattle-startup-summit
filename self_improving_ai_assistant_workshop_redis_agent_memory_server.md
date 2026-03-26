@@ -11,10 +11,11 @@
 - extracts facts from user conversations automatically
 - persists those facts as long‑term memories in Redis via Agent Memory Server (AMS)
 - retrieves relevant memories to improve subsequent responses
-- allows editing/deleting of memories for quick debugging
+- allows inspecting working memory, searching long-term memory, correcting records, and deleting memories for quick debugging
 
 **Why this is cool in 25 minutes**
 - Demonstrates an end‑to‑end memory lifecycle (observe → extract → store → retrieve → use)
+- Makes AMS observable: attendees see the working-memory payload, AMS responses, search results, and correction flow
 - Feels magical: user corrects the assistant once and it "remembers" later
 - Highlights production‑grade building blocks (AMS + Redis + embeddings)
 
@@ -36,15 +37,10 @@
 Option A: Run Redis & AMS locally (recommended for demo reproducibility)
 
 ```bash
-# start Redis Stack
-docker run -d --name redis-stack -p 6379:6379 redis/redis-stack:latest
-
-# start Agent Memory Server (AMS)
-# the official docker image tag may change; use latest if available
-docker run -d --name agent-memory-server -p 8000:8000 redis/agent-memory-server:latest
+docker compose up -d
 
 # verify
-curl http://localhost:8000/health
+curl http://localhost:8000/v1/health
 ```
 
 Option B: Use Redis Cloud and AMS running in Docker (change config in .env)
@@ -60,7 +56,6 @@ self-improving-assistant-workshop/
 │   └── onboarding.txt
 ├── agent.py
 ├── memory_manager.py
-├── extractors.py
 └── notebook.ipynb
 ```
 
@@ -76,22 +71,21 @@ self-improving-assistant-workshop/
 - Ask attendees to run the startup commands (Docker) if they haven't
 - Confirm OpenAI key present: `export OPENAI_API_KEY=...`
 
-**0:08–0:16 (8m) — Ingest + Automatic Extraction**
-- Explain the idea of extraction (convert conversation to structured facts)
-- Walk through `extractors.py` (simple rule-based + small LLM-based extractor)
-- Run a demo where user says: "I prefer morning meetings and I love hiking."
-- Show how extraction yields: `{ "prefers_meetings_at": "morning", "likes": ["hiking"] }`
-- Save those facts into AMS via `memory_manager.create_long_term_memories(...)`
+**0:08–0:16 (8m) — Ingest + Observable AMS Write**
+- Explain the idea of server-managed extraction (append messages to working memory and let AMS promote them)
+- Walk through `memory_manager.py` and the working-memory update flow
+- Run `python3 agent.py --showcase`
+- Highlight the working-memory payload and the returned AMS state for the rich Alice profile
 
-**0:16–0:22 (6m) — Retrieval + Use in Prompting**
-- Show how the assistant fetches relevant memories at query time
-- Run a query: "Schedule a meeting with me next week" → shows that assistant uses the `prefers_meetings_at` memory to suggest times
-- Walk through the retrieval code and the prompt template that injects memories
+**0:16–0:22 (6m) — Retrieval + Before/After Prompting**
+- Show the first scheduling answer before any memories exist
+- Show the second scheduling answer after the rich Alice profile is stored
+- Point to the retrieved memory list and the prompt memory context printed by the CLI
 
-**0:22–0:27 (5m) — Editing & Self‑improvement**
-- Demonstrate editing a memory (fix a wrong fact)
-- Show that subsequent queries use corrected memory
-- Optionally show a simple UI snippet or `curl` commands to list / delete memories via AMS HTTP API
+**0:22–0:27 (5m) — Correction + Isolation**
+- Demonstrate `/correct <memory_id> User prefers afternoon meetings.`
+- Show that subsequent queries use the corrected memory
+- Switch to `bob` and show a separate memory set and different recommendation
 
 **0:27–0:30 (3m) — Recap & Next steps**
 - Quick summary of architecture
@@ -102,7 +96,7 @@ self-improving-assistant-workshop/
 
 ## Core code snippets (drop‑in ready)
 
-> The `agent.py` will orchestrate user input → extractor → store → respond.
+> The `agent.py` will orchestrate user input → working memory → long-term retrieval → respond.
 
 ### requirements.txt
 ```
@@ -118,34 +112,8 @@ tqdm
 ### .env.example
 ```
 OPENAI_API_KEY=sk-...
-REDIS_URL=redis://localhost:6379
 AMS_URL=http://localhost:8000
 USER_ID=test_user
-```
-
-### extractors.py (simplified)
-```python
-# extractors.py — a tiny example extractor that uses a prompt-completion to extract simple facts
-import os
-from openai import OpenAI
-
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-EXTRACTION_PROMPT = """
-Extract short JSON facts from the user message. Only output JSON. Keys: prefers_meetings_at, likes
-User message: {message}
-"""
-
-async def extract_facts(message: str) -> dict:
-    prompt = EXTRACTION_PROMPT.format(message=message)
-    resp = client.chat.completions.create(model='gpt-4o-mini', messages=[{"role":"user","content":prompt}], max_tokens=200)
-    # naive parse
-    text = resp.choices[0].message.content
-    import json
-    try:
-        return json.loads(text)
-    except Exception:
-        return {}
 ```
 
 ### memory_manager.py
@@ -180,33 +148,23 @@ def delete_memory(user_id: str, memory_id: str):
 
 ### agent.py (or notebook cell)
 ```python
-# agent.py — simplified end-to-end flow
+# agent.py — AMS-native end-to-end flow
 import os
-from extractors import extract_facts
-from memory_manager import create_long_term_memories, search_long_term_memory
+from memory_manager import get_working_memory, put_working_memory, search_long_term_memory
 
 USER_ID = os.environ.get('USER_ID', 'test_user')
+SESSION_ID = f"ams-demo:{USER_ID}"
 
 async def handle_user_message(message: str):
-    # 1) extract facts
-    facts = await extract_facts(message)
-    memories = []
-    for k,v in facts.items():
-        memories.append({
-            'text': f"{k}: {v}",
-            'memory_type': 'semantic',
-            'metadata': {'source': 'conversation', 'fact_key': k}
-        })
-    if memories:
-        create_long_term_memories(USER_ID, memories)
+    working_memory = get_working_memory(SESSION_ID, USER_ID)
+    messages = list(working_memory.get("messages", []))
+    messages.append({"role": "user", "content": message})
+    put_working_memory(SESSION_ID, USER_ID, messages)
 
-    # 2) when answering later, retrieve related memories
     retrieved = search_long_term_memory(USER_ID, message)
-    # build prompt with retrieved memories (simple concatenation)
-    mem_text = "\n".join([m['text'] for m in retrieved.get('results', [])])
+    mem_text = "\n".join([m['text'] for m in retrieved.get('memories', [])])
 
     answer_prompt = f"You are an assistant. Use these memories: {mem_text}\nUser asked: {message}"
-    # call LLM for final answer (left as an exercise — use OpenAI or Anthropic)
     return answer_prompt
 
 # small interactive demo
@@ -220,16 +178,18 @@ if __name__ == '__main__':
 ---
 
 ## Demo data and scenarios (so attendees can reproduce quickly)
-1. **Onboarding facts** — participant types: "I prefer morning meetings and I love hiking." → extractor should produce two facts.
-2. **Follow-up use** — participant types later: "Schedule a 30‑minute sync next week" → assistant suggests morning slots.
-3. **Correction** — participant types: "No, I actually prefer afternoons" → show deletion/edit flow and then re-query.
+1. **Before/after** — ask: "Can you schedule a 30‑minute sync next week?" before any memories exist.
+2. **Richer onboarding facts** — add: "I'm a product engineer based in Seattle. I prefer morning meetings, I'm vegetarian, I'm working on Summit Copilot, and I love hiking and espresso."
+3. **Observable retrieval** — run `/working`, then `/list` and `/search Summit Copilot vegetarian Seattle`.
+4. **Correction** — patch a real memory by ID with `/correct <memory_id> User prefers afternoon meetings.` and then re-query.
+5. **Isolation** — switch to `bob`, add a different profile, and compare answers.
 
 ---
 
 ## Troubleshooting tips (common gotchas)
 - If AMS returns 404 on `/memories/long-term`, ensure AMS container is up and that you used the correct image tag.
 - If OpenAI calls fail, check `OPENAI_API_KEY` and network access.
-- Extraction prompt might produce non‑JSON: include a fallback rule-based parser in `extractors.py` to avoid crashing.
+- If automatic extraction does not appear in long-term memory, confirm AMS extraction is enabled and give the server a moment to promote memories from working memory.
 
 ---
 
@@ -255,7 +215,7 @@ if __name__ == '__main__':
 ## Repo & deliverables to attach to CFP
 - `README.md` with one‑line setup and run instructions
 - `demo_data/onboarding.txt` with sample utterances
-- `agent.py`, `memory_manager.py`, `extractors.py`
+- `agent.py`, `memory_manager.py`
 - `notebook.ipynb` that walks step‑by‑step (cells for each block)
 - `slides.pdf` (5–8 slides)
 
@@ -328,62 +288,6 @@ python agent.py
 Type conversational lines like `I prefer morning meetings and I love hiking.` then ask `Schedule a meeting next week` to see the assistant use stored memories.
 ```
 
----
-
-## File: extractors.py
-```python
-# extractors.py
-import os
-import json
-from dotenv import load_dotenv
-load_dotenv()
-from openai import OpenAI
-
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-EXTRACTION_PROMPT = '''
-You are a JSON extractor. Given a user message, output a JSON object with keys (only if present):
-- prefers_meetings_at: one of "morning", "afternoon", "evening"
-- likes: an array of short interests (e.g., hiking, cycling)
-
-Only output valid JSON. If no facts are found, output {}.
-
-User message: "{message}"
-'''
-
-async def extract_facts(message: str) -> dict:
-    prompt = EXTRACTION_PROMPT.format(message=message)
-    try:
-        resp = client.chat.completions.create(
-            model='gpt-4o-mini',
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=200,
-            temperature=0
-        )
-        text = resp.choices[0].message.content.strip()
-        return json.loads(text)
-    except Exception as e:
-        # Fallback: simple rule-based extractor
-        facts = {}
-        msg = message.lower()
-        if 'morning' in msg:
-            facts['prefers_meetings_at'] = 'morning'
-        elif 'afternoon' in msg:
-            facts['prefers_meetings_at'] = 'afternoon'
-        elif 'evening' in msg:
-            facts['prefers_meetings_at'] = 'evening'
-        likes = []
-        for kw in ['hiking', 'cycling', 'reading', 'cooking', 'travel']:
-            if kw in msg:
-                likes.append(kw)
-        if likes:
-            facts['likes'] = likes
-        return facts
-```
-
----
-
 ## File: memory_manager.py
 ```python
 # memory_manager.py
@@ -428,50 +332,32 @@ def delete_memory(user_id: str, memory_id: str):
 # agent.py — simple interactive assistant demo
 import os
 import asyncio
-import json
 from dotenv import load_dotenv
 load_dotenv()
-from extractors import extract_facts
-from memory_manager import create_long_term_memories, search_long_term_memory
+from memory_manager import get_working_memory, put_working_memory, search_long_term_memory
 from openai import OpenAI
 
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 USER_ID = os.environ.get('USER_ID', 'test_user')
+SESSION_ID = f"ams-demo:{USER_ID}"
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 async def handle_user_message(message: str) -> str:
-    # Step 1: extract facts and store
-    facts = await extract_facts(message)
-    memories = []
-    for k, v in facts.items():
-        mem_text = ''
-        if isinstance(v, list):
-            mem_text = f"{k}: {', '.join(v)}"
-        else:
-            mem_text = f"{k}: {v}"
-        memories.append({
-            'text': mem_text,
-            'memory_type': 'semantic',
-            'metadata': {'source': 'conversation', 'fact_key': k}
-        })
-    if memories:
-        try:
-            create_long_term_memories(USER_ID, memories)
-        except Exception as e:
-            print('Failed to create memories:', e)
+    working_memory = get_working_memory(SESSION_ID, USER_ID)
+    messages = list(working_memory.get("messages", []))
+    messages.append({"role": "user", "content": message})
+    put_working_memory(SESSION_ID, USER_ID, messages)
 
-    # Step 2: retrieve relevant memories
     try:
         res = search_long_term_memory(USER_ID, message)
-        results = res.get('results', [])
+        results = res.get('memories', [])
     except Exception as e:
         print('Memory search failed:', e)
         results = []
 
-    mem_text = '
-'.join([r.get('text', '') for r in results])
+    mem_text = '\n'.join([r.get('text', '') for r in results])
 
-    # Step 3: call LLM for final assistant reply, injecting memories
+    # Step 2: call LLM for final assistant reply, injecting memories
     prompt = f"You are a helpful assistant. Use the following memories if relevant:
 {mem_text}
 
@@ -525,4 +411,3 @@ If you'd like, I can now:
 - create the Jupyter notebook cells from the same code,
 - generate a 6-slide deck to accompany the live demo,
 - or produce a zip file containing these files for download.
-
