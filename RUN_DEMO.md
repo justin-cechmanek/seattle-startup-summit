@@ -107,7 +107,7 @@ Open:
 
 `self_improving_assistant_workshop.ipynb`
 
-The notebook still mirrors the basic pipeline, but the default showcase path is now the AMS-native CLI in [agent.py](/Users/justin.cechmanek/Documents/demos/seattle-startup-summit/agent.py).
+The notebook now mirrors the same AMS-native flow as the CLI, but the default showcase path is still [agent.py](/Users/justin.cechmanek/Documents/demos/seattle-startup-summit/agent.py).
 
 ## 9. Common issues
 

@@ -2,7 +2,7 @@
 
 
 ### Abstract:
-This workshop is for AI engineers and developers who want to build a running mini assistant. By the end of the workshop each participant will have an assistant that extracts facts from conversations automatically, persists those facts as longterm memories in Redis, and retrieves relevant memories to improve its following responses. This agent will learn about you and improve its performance over time. This demonstrates an end to end agent memory lifecycle using production-grade systems. 
+This workshop is for AI engineers and developers who want to build a running mini assistant with Redis Agent Memory Server. By the end of the workshop each participant will have an assistant that writes raw messages into AMS working memory, lets AMS extract and promote useful long-term memories, and retrieves those memories to improve later responses. The demo also shows how to inspect working memory, search long-term memory, and correct stored records. This demonstrates an end-to-end agent memory lifecycle using production-grade systems.
 
 
 ### Prerequisites:
