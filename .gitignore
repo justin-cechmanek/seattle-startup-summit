@@ -25,3 +25,6 @@ pip-wheel-metadata/
 .idea/
 .vscode/
 
+# presentation files
+*.pptx
+*.ppt
