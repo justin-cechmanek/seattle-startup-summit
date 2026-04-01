@@ -62,45 +62,12 @@ The showcase demonstrates:
 - before/after behavior on a scheduling question
 - visible AMS working-memory writes
 - long-term memory search
-- patch-by-ID correction
-- multi-user isolation with `alice` and `bob`
 
 For interactive mode:
 
 ```bash
 python3 agent.py
 ```
-
-Useful commands:
-
-- `/help`
-- `/showcase`
-- `/debug on`
-- `/working`
-- `/list`
-- `/search Summit Copilot vegetarian Seattle`
-- `/correct <memory_id> User prefers afternoon meetings.`
-- `/delete <memory_id>`
-- `/user bob`
-- `/clear`
-
-Any non-command input is appended to AMS working memory and then answered using retrieved memory context.
-
-## Suggested live flow
-
-1. Ask: `Can you schedule a 30-minute sync next week?`
-2. Add a richer profile: `I'm a product engineer based in Seattle. I prefer morning meetings, I'm vegetarian, I'm working on Summit Copilot, and I love hiking and espresso.`
-3. Run `/working`, then `/list` or `/search Summit Copilot vegetarian Seattle`
-4. Ask the scheduling question again
-5. Copy a memory ID from `/list` and run `/correct <memory_id> User prefers afternoon meetings.`
-6. Ask the scheduling question again
-7. Switch users with `/user bob` and repeat with a different profile
-
-The sample profile data is also in [demo_data/onboarding.txt](/Users/justin.cechmanek/Documents/demos/seattle-startup-summit/demo_data/onboarding.txt).
-
-## Notebook
-
-[self_improving_assistant_workshop.ipynb](/Users/justin.cechmanek/Documents/demos/seattle-startup-summit/self_improving_assistant_workshop.ipynb) mirrors the same AMS-native flow as the CLI.
 
 ## Troubleshooting
 
