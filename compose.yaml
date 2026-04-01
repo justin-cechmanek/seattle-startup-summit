@@ -5,9 +5,11 @@ services:
     ports:
       - "6379:6379"
 
-  agent-memory-server:
+  # API with Docket task backend — background extraction is queued for task-worker.
+  # See: https://github.com/redis/agent-memory-server#using-docker
+  api-for-task-worker:
     image: redislabs/agent-memory-server:latest
-    container_name: agent-memory-server
+    container_name: api-for-task-worker
     depends_on:
       - redis-stack
     environment:
@@ -17,3 +19,32 @@ services:
       REDIS_URL: redis://redis-stack:6379
     ports:
       - "8000:8000"
+    command:
+      [
+        "agent-memory",
+        "api",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--task-backend",
+        "docket",
+      ]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  task-worker:
+    image: redislabs/agent-memory-server:latest
+    container_name: task-worker
+    depends_on:
+      - redis-stack
+    environment:
+      ENABLE_DISCRETE_MEMORY_EXTRACTION: "true"
+      GENERATION_MODEL: gpt-4o-mini
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      REDIS_URL: redis://redis-stack:6379
+    command: ["agent-memory", "task-worker"]
+    restart: unless-stopped
