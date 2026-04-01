@@ -1,51 +1,30 @@
 # agent.py — AMS-native interactive showcase
-import argparse
 import asyncio
-import json
 import os
-import shlex
-
+import time
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 from requests import RequestException
+
+from agent_memory_client import MemoryAPIClient, MemoryClientConfig
+from agent_memory_client.models import MemoryMessage, MemoryStrategyConfig
+
 
 load_dotenv()
 
-from memory_manager import (
-    delete_all_memories,
-    delete_memory,
-    delete_working_memory,
-    get_working_memory,
-    healthcheck,
-    list_memories,
-    put_working_memory,
-    search_long_term_memory,
-    update_memory,
-)
-
-USER_ID = os.environ.get("USER_ID", "test_user")
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
+USER_ID = "justin"
+NAMESPACE = "LIVE_DEMO"
 SESSION_PREFIX = os.environ.get("SESSION_PREFIX", "ams-demo")
-DEFAULT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+DEFAULT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-5.4")
 
 SYSTEM_PROMPT = """You are a helpful assistant with access to a user's remembered preferences.
 Use remembered facts when they are relevant, but do not mention internal tools or memory systems.
 If the user is sharing preferences or personal facts, acknowledge them briefly and respond naturally.
-If the user asks for scheduling help and you know a meeting-time preference, use it in your answer.
 Do not invent preferences that are not present in the provided memories.
 """
 
-
-def _print_header(title):
-    print(f"\n=== {title} ===")
-
-
-def _json_dump(payload):
-    return json.dumps(payload, indent=2, sort_keys=True)
-
-
-def _session_id_for_user(user_id):
-    return f"{SESSION_PREFIX}:{user_id}"
+llm_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 
 def _message_text(message):
@@ -62,27 +41,6 @@ def _recent_transcript(messages, limit=6):
     for message in messages[-limit:]:
         lines.append(f"{message.get('role', 'unknown')}: {_message_text(message)}")
     return "\n".join(lines)
-
-
-def _fallback_answer(message, mem_text):
-    lower_message = message.lower()
-    is_scheduling_request = any(
-        phrase in lower_message
-        for phrase in ("schedule", "sync", "calendar", "time slot", "availability")
-    )
-    if is_scheduling_request:
-        if "afternoon" in mem_text.lower():
-            return "You prefer afternoon meetings, so I suggest a 30-minute afternoon slot next week."
-        if "morning" in mem_text.lower():
-            return "You prefer morning meetings, so I suggest a 30-minute morning slot next week."
-        if "evening" in mem_text.lower():
-            return "You prefer evening meetings, so I suggest a 30-minute evening slot next week."
-        return "I can suggest a 30-minute slot next week. If you share a meeting-time preference, I can tailor it."
-
-    if mem_text:
-        return f"I've stored these memories for future turns:\n{mem_text}"
-
-    return "Thanks, I understand. What would you like to do next?"
 
 
 def _render_memories(memories):
@@ -109,32 +67,8 @@ def _working_memory_payload(user_id, messages, existing_working_memory):
     return payload
 
 
-def _print_observable_result(result):
-    _print_header(f"AMS Trace for user={result['user_id']}")
-    print(f"Session ID: {result['session_id']}")
-    print(f"User message: {result['message']}")
-
-    print("\nWorking memory update payload:")
-    print(_json_dump(result["working_memory_payload"]))
-
-    if result["working_memory_after"] is not None:
-        print("\nWorking memory after PUT:")
-        print(_json_dump(result["working_memory_after"]))
-
-    print("\nLong-term memories retrieved:")
-    _render_memories(result["retrieved_memories"])
-
-    print("\nPrompt memory context:")
-    print(result["prompt_memory_text"] or "None")
-
-    if result["errors"]:
-        print("\nErrors:")
-        for error in result["errors"]:
-            print(f"- {error}")
-
-
-async def handle_user_message(message, user_id=USER_ID, debug=False):
-    session_id = _session_id_for_user(user_id)
+async def handle_user_message(message, user_id=USER_ID):
+    session_id = SESSION_PREFIX
     result = {
         "user_id": user_id,
         "session_id": session_id,
@@ -204,72 +138,19 @@ async def handle_user_message(message, user_id=USER_ID, debug=False):
     )
 
     try:
-        response = client.chat.completions.create(
+        response = await llm_client.chat.completions.create(
             model=DEFAULT_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=200,
+            max_completion_tokens=200,
             temperature=0.2,
         )
-        result["answer"] = response.choices[0].message.content.strip()
+        result["answer"] = (response.choices[0].message.content or "").strip()
     except Exception as exc:
         result["errors"].append(f"LLM response failed: {exc}")
-        result["answer"] = _fallback_answer(message, result["prompt_memory_text"])
-
-    if debug:
-        _print_observable_result(result)
-
     return result
-
-
-def _show_health():
-    _print_header("AMS Health")
-    try:
-        print(_json_dump(healthcheck()))
-    except RequestException as exc:
-        print(f"AMS health check failed: {exc}")
-
-
-def _show_working_memory(user_id):
-    _print_header(f"Working memory for {user_id}")
-    try:
-        working_memory = get_working_memory(_session_id_for_user(user_id), user_id)
-    except RequestException as exc:
-        print(f"AMS working-memory read failed: {exc}")
-        return
-    print(_json_dump(working_memory))
-
-
-def _show_memories(user_id):
-    _print_header(f"Long-term memories for {user_id}")
-    try:
-        memories = list_memories(user_id).get("memories", [])
-    except RequestException as exc:
-        print(f"AMS list failed: {exc}")
-        return
-    _render_memories(memories)
-
-
-def _search_memories(user_id, query):
-    _print_header(f"Search long-term memories for {user_id}")
-    print(f"Query: {query}")
-    try:
-        memories = search_long_term_memory(user_id, query).get("memories", [])
-    except RequestException as exc:
-        print(f"AMS search failed: {exc}")
-        return []
-    _render_memories(memories)
-    return memories
-
-
-def _delete_memory(memory_id):
-    _print_header("Delete Memory")
-    try:
-        print(_json_dump(delete_memory(memory_id)))
-    except RequestException as exc:
-        print(f"AMS delete failed: {exc}")
 
 
 def _clear_user(user_id):
@@ -281,7 +162,7 @@ def _clear_user(user_id):
         deleted = []
 
     try:
-        delete_working_memory(_session_id_for_user(user_id), user_id)
+        delete_working_memory(SESSION_PREFIX, user_id)
         print("Deleted working memory session.")
     except RequestException as exc:
         print(f"AMS working-memory clear failed: {exc}")
@@ -294,195 +175,123 @@ def _clear_user(user_id):
         print("No long-term memories to delete.")
 
 
-def _correct_memory(memory_id, new_text):
-    _print_header("Correct Memory")
-    print(f"Updating memory {memory_id}")
-    try:
-        print(_json_dump(update_memory(memory_id, {"text": new_text})))
-    except RequestException as exc:
-        print(f"AMS correction failed: {exc}")
 
+async def parse_prompt(prompt, client):
+    if not prompt.startswith("/"):
+        return prompt
+    command, * args = prompt.split(" ")
+    if command == "/help":
+        print( "Available commands: help, clear, correct, delete, show, memories, working_memory")
+    if command == "/clear":
+        print( "Clearing memories and working memory...")
+    if command == "/correct":
+        print( "Correcting memory...")
+    if command == "/delete":
+        print( "Deleting memory_id: {args[0]}...")
+        deleted = await client.delete_memory(args[0])
+        print(deleted)
+    if command == "/show_transcript":
+        print( "Showing conversation transcript...")
+        print('========================================')
+        prompt_result = await client.memory_prompt(
+            session_id=SESSION_PREFIX,
+            query=" ".join(args[0:]),
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            long_term_search={"user_id": {"eq": USER_ID}}
+        )
+        for m in prompt_result.get("messages", []):
+            print(f"{m['role']}: {_message_text(m)}")
+        print('========================================')
+        return
+    if command == "/show_memories":
+        print(f"Showing memories for {USER_ID}")
+        print('========================================')
+        result = await client.search_long_term_memory(
+            text=" ".join(args[0:]),  # Broad search
+            namespace={"eq": NAMESPACE},
+            user_id={"eq": USER_ID},
+            limit=20,
+        )
+        for memory in result.memories:
+            topics = memory.topics if memory.topics else []
+            print(f"{memory.text}\n  topics: {topics}\n")
+        print('========================================')
+        return
+    if command == "/exit":
+        print( "Exiting...")
+        exit()
+    return prompt
 
-async def _wait_for_long_term_memory(user_id, query, min_count=1, attempts=8, delay_seconds=0.75):
-    for _ in range(attempts):
-        try:
-            memories = search_long_term_memory(user_id, query).get("memories", [])
-        except RequestException:
-            return []
-        if len(memories) >= min_count:
-            return memories
-        await asyncio.sleep(delay_seconds)
-    return []
-
-
-async def _run_turn(user_id, message, debug):
-    print(f"\nUSER ({user_id}): {message}")
-    result = await handle_user_message(message, user_id=user_id, debug=debug)
-    print(f"ASSISTANT: {result['answer']}")
-    return result
-
-
-def _find_first_memory_id_by_query(user_id, query):
-    try:
-        memories = search_long_term_memory(user_id, query).get("memories", [])
-    except RequestException:
-        return None
-    if not memories:
-        return None
-    return memories[0].get("id")
-
-
-async def run_showcase(debug=True):
-    alice = "alice"
-    bob = "bob"
-
-    _print_header("Redis AMS Showcase")
-    print("This walkthrough demonstrates AMS-managed extraction from working memory,")
-    print("observable working-memory writes, long-term search, memory editing, and multi-user isolation.")
-
-    _show_health()
-
-    for user_id in (alice, bob):
-        _clear_user(user_id)
-
-    await _run_turn(alice, "Can you schedule a 30-minute sync next week?", debug)
-    await _run_turn(
-        alice,
-        (
-            "I'm a product engineer based in Seattle. I prefer morning meetings, "
-            "I'm vegetarian, I'm working on Summit Copilot, and I love hiking and espresso."
-        ),
-        debug,
+async def async_main():
+    config = MemoryClientConfig(
+        base_url=BASE_URL,
+        timeout=30.0,
+        default_namespace=NAMESPACE,
     )
-    await _wait_for_long_term_memory(alice, "Seattle morning vegetarian Summit Copilot", min_count=1)
-    _show_working_memory(alice)
-    _show_memories(alice)
-    _search_memories(alice, "Summit Copilot vegetarian Seattle")
-    await _run_turn(alice, "Can you schedule a 30-minute sync next week?", debug)
 
-    memory_id = _find_first_memory_id_by_query(alice, "morning meetings preference")
-    if memory_id:
-        _correct_memory(memory_id, "User prefers afternoon meetings.")
-    else:
-        print("\nNo memory matched the correction query. Skip the edit or inspect /list output.")
-    _show_memories(alice)
-    await _run_turn(alice, "Can you schedule a 30-minute sync next week?", debug)
-
-    await _run_turn(
-        bob,
-        (
-            "I'm a founder in New York. I prefer evening meetings, "
-            "I'm vegan, and I'm building FinPilot."
+    client = MemoryAPIClient(config)
+    created, working_memory = await client.get_or_create_working_memory(
+        session_id=SESSION_PREFIX,
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        long_term_memory_strategy=MemoryStrategyConfig(
+            strategy="preferences"
         ),
-        debug,
     )
-    await _wait_for_long_term_memory(bob, "New York evening vegan FinPilot", min_count=1)
-    await _run_turn(bob, "Can you schedule a 30-minute sync next week?", debug)
 
-    _print_header("Isolation Check")
-    print("Alice:")
-    _show_memories(alice)
-    print("\nBob:")
-    _show_memories(bob)
-
-
-def _print_help():
-    _print_header("Commands")
-    print("/help                             Show commands")
-    print("/showcase                         Run the scripted AMS showcase")
-    print("/debug on|off                     Toggle verbose AMS tracing")
-    print("/user <user_id>                   Switch the active user")
-    print("/health                           Check AMS health")
-    print("/working                          Show working memory for the active user")
-    print("/list                             List long-term memories for the active user")
-    print("/search <query>                   Search long-term memories for the active user")
-    print("/delete <memory_id>               Delete a memory by ID")
-    print("/correct <memory_id> <new text>   Patch a memory's text by ID")
-    print("/clear                            Delete working and long-term memory for the active user")
-    print("/quit                             Exit")
-    print("\nAny other input is appended to AMS working memory and handled through the assistant pipeline.")
-
-
-async def interactive_cli(default_user_id, debug):
-    current_user_id = default_user_id
-    _print_header("AMS Interactive Demo")
-    print(f"Active user: {current_user_id}")
-    print("Use /showcase for the guided demo or /help for commands.")
 
     while True:
         try:
-            raw = input(f"{current_user_id}> ").strip()
+            user_prompt = input(f"{USER_ID}> ").strip()
+            user_prompt = await parse_prompt(user_prompt, client)
+            if not user_prompt:
+                continue
         except EOFError:
             print()
             break
 
-        if not raw:
+
+        # get relevant memories from working_memory
+        prompt_result = await client.memory_prompt(
+            session_id=SESSION_PREFIX,
+            query=user_prompt,
+            namespace=NAMESPACE,
+            user_id=USER_ID,
+            long_term_search={
+                "limit": 5,
+                # distance_threshold: Lower = stricter when set. If omitted, the server
+                # uses no distance filter (distance_threshold=None) for broader KNN recall.
+                "user_id": {"eq": USER_ID}  # Only search this user's memories
+            }
+        )
+
+        response = await llm_client.chat.completions.create(
+            model=DEFAULT_MODEL,
+            messages=[
+                {"role": m["role"], "content": _message_text(m)} for m in (prompt_result.get("messages") or [])
+            ]
+            + [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
+            max_completion_tokens=200,
+            temperature=0.2,
+        )
+        response = response.choices[0].message.content.strip()
+        print(response)
+
+        if (not user_prompt) or (not response):
             continue
 
-        if raw.startswith("/"):
-            parts = shlex.split(raw)
-            command = parts[0]
-
-            if command == "/help":
-                _print_help()
-            elif command == "/showcase":
-                await run_showcase(debug=debug)
-            elif command == "/debug" and len(parts) == 2:
-                debug = parts[1].lower() == "on"
-                print(f"Debug tracing {'enabled' if debug else 'disabled'}.")
-            elif command == "/user" and len(parts) == 2:
-                current_user_id = parts[1]
-                print(f"Active user switched to {current_user_id}.")
-            elif command == "/health":
-                _show_health()
-            elif command == "/working":
-                _show_working_memory(current_user_id)
-            elif command == "/list":
-                _show_memories(current_user_id)
-            elif command == "/search" and len(parts) >= 2:
-                _search_memories(current_user_id, " ".join(parts[1:]))
-            elif command == "/delete" and len(parts) == 2:
-                _delete_memory(parts[1])
-            elif command == "/clear":
-                _clear_user(current_user_id)
-            elif command == "/correct" and len(parts) >= 3:
-                _correct_memory(parts[1], " ".join(parts[2:]))
-            elif command == "/quit":
-                break
-            else:
-                print("Unknown command. Use /help.")
-            continue
-
-        result = await handle_user_message(raw, user_id=current_user_id, debug=debug)
-        print(f"Assistant: {result['answer']}")
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Redis AMS workshop demo")
-    parser.add_argument(
-        "--showcase",
-        action="store_true",
-        help="run the scripted AMS showcase and exit",
-    )
-    parser.add_argument(
-        "--user-id",
-        default=USER_ID,
-        help="default user id for interactive mode",
-    )
-    parser.add_argument(
-        "--no-debug",
-        action="store_true",
-        help="disable verbose AMS tracing",
-    )
-    args = parser.parse_args()
-
-    debug = not args.no_debug
-    if args.showcase:
-        asyncio.run(run_showcase(debug=debug))
-        return
-
-    asyncio.run(interactive_cli(default_user_id=args.user_id, debug=debug))
+        # append response to working_memory
+        await client.append_messages_to_working_memory(messages=[
+            MemoryMessage(role="user", content=user_prompt, created_at=time.time()),
+            MemoryMessage(role="assistant", content=response, created_at=time.time()),
+            ],
+        session_id=SESSION_PREFIX,
+        namespace=NAMESPACE,
+        user_id=USER_ID,
+        )
+        # continue conversation
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main())
